@@ -17,6 +17,7 @@ const familyMemberRoutes = require("./routes/familyMemberRoutes");
 const budgetRoutes = require("./routes/budgetRoutes");
 const teamRoutes = require("./routes/teamRoutes");
 const incomeRoutes = require("./routes/incomeRoutes");
+const sheetRoutes = require("./routes/sheetRoutes");
 
 // Middleware
 const errorHandler = require("./middleware/errorMiddleware");
@@ -71,6 +72,7 @@ app.use("/api/family-members", familyMemberRoutes);
 app.use("/api/budgets", budgetRoutes);
 app.use("/api/team", teamRoutes);
 app.use("/api/incomes", incomeRoutes);
+app.use("/api/sheets", sheetRoutes);
 
 // Error Middleware (ALWAYS LAST)
 app.use(errorHandler);
