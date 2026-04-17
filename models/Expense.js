@@ -10,8 +10,19 @@ const expenseSchema = new mongoose.Schema(
     },
     user: {
       type: mongoose.Schema.Types.ObjectId,
-      required: true,
+      required: function() { return !this.guestId; },
       ref: "User",
+      default: null,
+    },
+    guestId: {
+      type: String,
+      default: null,
+      index: true,
+    },
+    recurringTransactionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "RecurringTransaction",
+      default: null,
     },
     name: {
       type: String,

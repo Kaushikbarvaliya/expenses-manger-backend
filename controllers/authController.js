@@ -375,11 +375,11 @@ exports.resetPasswordWithOtp = async (req, res) => {
 // Merge guest data with user account
 exports.mergeGuestData = async (req, res) => {
   try {
-    const { guestExpenses, guestIncomes, sheetId } = req.body;
+    const { guestExpenses, guestIncomes, guestId, sheetId } = req.body;
     const userId = req.user._id;
 
     // Validate input
-    if (!guestExpenses && !guestIncomes) {
+    if (!guestExpenses && !guestIncomes && !guestId) {
       return res.status(400).json({ message: "No guest data provided" });
     }
 
@@ -405,8 +405,31 @@ exports.mergeGuestData = async (req, res) => {
       expensesSkipped: 0,
       incomesMerged: 0,
       incomesSkipped: 0,
+      backendRecordsMerged: 0,
       errors: []
     };
+
+    // If a guestId string was provided, update any records created on the backend as a guest
+    if (guestId) {
+       const RecurringTransaction = require("../models/RecurringTransaction");
+       
+       const recurringRes = await RecurringTransaction.updateMany(
+         { guestId },
+         { $set: { user: userId, guestId: null } }
+       );
+       const expenseRes = await Expense.updateMany(
+         { guestId },
+         { $set: { user: userId, guestId: null } }
+       );
+       const incomeRes = await Income.updateMany(
+         { guestId },
+         { $set: { user: userId, guestId: null } }
+       );
+
+       results.backendRecordsMerged = (recurringRes.modifiedCount || recurringRes.nModified || 0) + 
+                                      (expenseRes.modifiedCount || expenseRes.nModified || 0) + 
+                                      (incomeRes.modifiedCount || incomeRes.nModified || 0);
+    }
 
     // Helper function to check for duplicates using UUID
     const isDuplicateExpense = async (expense, userId) => {

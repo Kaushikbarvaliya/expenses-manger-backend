@@ -18,6 +18,7 @@ const budgetRoutes = require("./routes/budgetRoutes");
 const teamRoutes = require("./routes/teamRoutes");
 const incomeRoutes = require("./routes/incomeRoutes");
 const sheetRoutes = require("./routes/sheetRoutes");
+const recurringRoutes = require("./routes/recurringRoutes");
 
 // Middleware
 const errorHandler = require("./middleware/errorMiddleware");
@@ -30,6 +31,8 @@ connectDB();
 // Start Cron Jobs
 const startRecurringCron = require("./cron/recurringCron");
 startRecurringCron();
+const startRecurringTransactionCron = require("./cron/recurringTransactionJob");
+startRecurringTransactionCron();
 
 // Global Middleware
 app.use(morgan("dev"));
@@ -46,7 +49,7 @@ app.use(cors({
     ];
     
     const isAllowed = allowedOrigins.includes(origin) || 
-                     /^http:\/\/192\.168\.\d+\.\d+:8081$/.test(origin) ||
+                     /^http:\/\/192\.168\.\d+\.\d+:(8081|8082)$/.test(origin) ||
                      origin.includes("localhost");
 
     if (isAllowed) {
@@ -73,6 +76,7 @@ app.use("/api/budgets", budgetRoutes);
 app.use("/api/team", teamRoutes);
 app.use("/api/incomes", incomeRoutes);
 app.use("/api/sheets", sheetRoutes);
+app.use("/api/recurring", recurringRoutes);
 
 // Error Middleware (ALWAYS LAST)
 app.use(errorHandler);

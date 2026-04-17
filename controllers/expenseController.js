@@ -30,6 +30,15 @@ exports.computeNextDue = computeNextDue;
 // ─── GET /api/expenses ───────────────────────────────────────────────────────
 exports.getExpenses = async (req, res) => {
   try {
+    const guestId = req.query.guestId;
+    
+    if (!req.user && guestId) {
+      const expenses = await Expense.find({ guestId })
+        .populate("familyMember", "name relation")
+        .sort({ date: -1, createdAt: -1 });
+      return res.json(expenses);
+    }
+
     const workspace = await requireWorkspacePermission(req, "view_sheet");
     const expenses = await Expense.find(buildWorkspaceFilter(workspace, "user"))
       .populate("familyMember", "name relation")
@@ -49,12 +58,18 @@ exports.getExpenses = async (req, res) => {
  */
 exports.getRecurringExpenses = async (req, res) => {
   try {
-    const workspace = await requireWorkspacePermission(req, "view_sheet");
+    const guestId = req.query.guestId;
+    let filter;
 
-    const filter = {
-      ...buildWorkspaceFilter(workspace, "user"),
-      recurring: true,
-    };
+    if (!req.user && guestId) {
+      filter = { guestId, recurring: true };
+    } else {
+      const workspace = await requireWorkspacePermission(req, "view_sheet");
+      filter = {
+        ...buildWorkspaceFilter(workspace, "user"),
+        recurring: true,
+      };
+    }
 
     if (req.query.frequency) {
       filter.frequency = req.query.frequency;
@@ -121,33 +136,45 @@ exports.createExpense = async (req, res) => {
   }
 
   try {
-    const workspace = await requireWorkspacePermission(req, "manage_expenses");
-    const ownerId = workspace.ownerId;
-
+    const guestId = req.body.guestId;
+    let workspace = null;
+    let ownerId = null;
+    let sheetId = null;
     let selectedMember = null;
     let selectedUser = null;
-    let resolvedMemberName = req.user.name;
+    let resolvedMemberName = "Me";
 
-    if (resolvedMemberId === "self") {
-      selectedUser = req.user._id;
-      resolvedMemberName = req.user.name;
+    if (!req.user && guestId) {
+      // Guest mode - no workspace/ownerId
+      resolvedMemberName = "Guest";
     } else {
-      const memberInfo = await resolveMember(resolvedMemberId, workspace, req.user);
-      if (!memberInfo) {
-        return res.status(400).json({ message: "Selected member is invalid" });
-      }
+      workspace = await requireWorkspacePermission(req, "manage_expenses");
+      ownerId = workspace.ownerId;
+      sheetId = workspace.sheetId;
+      resolvedMemberName = req.user.name;
 
-      if (memberInfo.type === "user") {
-        selectedUser = memberInfo.id;
+      if (resolvedMemberId === "self") {
+        selectedUser = req.user._id;
+        resolvedMemberName = req.user.name;
       } else {
-        selectedMember = memberInfo.id;
+        const memberInfo = await resolveMember(resolvedMemberId, workspace, req.user);
+        if (!memberInfo) {
+          return res.status(400).json({ message: "Selected member is invalid" });
+        }
+
+        if (memberInfo.type === "user") {
+          selectedUser = memberInfo.id;
+        } else {
+          selectedMember = memberInfo.id;
+        }
+        resolvedMemberName = memberInfo.name;
       }
-      resolvedMemberName = memberInfo.name;
     }
 
     const expense = await Expense.create({
-      sheet: workspace.sheetId,
+      sheet: sheetId,
       user: ownerId,
+      guestId: !req.user ? guestId : null,
       name,
       category: resolvedCategory,
       amount: numericAmount,
@@ -188,11 +215,21 @@ exports.updateExpense = async (req, res) => {
   }
 
   try {
-    const workspace = await requireWorkspacePermission(req, "manage_expenses");
-    const expense = await Expense.findOne({
-      _id: req.params.id,
-      ...buildWorkspaceFilter(workspace, "user"),
-    });
+    const guestId = req.body.guestId || req.query.guestId;
+    let filter = { _id: req.params.id };
+    let workspace = null;
+
+    if (!req.user && guestId) {
+      filter.guestId = guestId;
+    } else {
+      workspace = await requireWorkspacePermission(req, "manage_expenses");
+      filter = {
+        ...filter,
+        ...buildWorkspaceFilter(workspace, "user"),
+      };
+    }
+
+    const expense = await Expense.findOne(filter);
 
     if (!expense) {
       return res.status(404).json({ message: "Expense not found" });
@@ -230,11 +267,11 @@ exports.updateExpense = async (req, res) => {
 
     // ── Family member ──
     if (resolvedMemberId !== undefined) {
-      if (resolvedMemberId === "self") {
+      if (resolvedMemberId === "self" && req.user) {
         expense.familyMember = null;
         expense.assignedUser = req.user._id;
         expense.familyMemberName = req.user.name;
-      } else {
+      } else if (resolvedMemberId !== "self" && workspace) {
         const memberInfo = await resolveMember(resolvedMemberId, workspace, req.user);
         if (!memberInfo) {
           return res.status(400).json({ message: "Selected member is invalid" });
@@ -248,6 +285,8 @@ exports.updateExpense = async (req, res) => {
           expense.assignedUser = null;
         }
         expense.familyMemberName = memberInfo.name;
+      } else if (!req.user && guestId) {
+        expense.familyMemberName = "Guest";
       }
     }
 
@@ -266,11 +305,20 @@ exports.updateExpense = async (req, res) => {
  */
 exports.pauseRecurringExpense = async (req, res) => {
   try {
-    const workspace = await requireWorkspacePermission(req, "manage_expenses");
-    const expense = await Expense.findOne({
-      _id: req.params.id,
-      ...buildWorkspaceFilter(workspace, "user"),
-    });
+    const guestId = req.body.guestId || req.query.guestId;
+    let filter = { _id: req.params.id };
+
+    if (!req.user && guestId) {
+      filter.guestId = guestId;
+    } else {
+      const workspace = await requireWorkspacePermission(req, "manage_expenses");
+      filter = {
+        ...filter,
+        ...buildWorkspaceFilter(workspace, "user"),
+      };
+    }
+
+    const expense = await Expense.findOne(filter);
 
     if (!expense) {
       return res.status(404).json({ message: "Expense not found" });
@@ -301,11 +349,20 @@ exports.pauseRecurringExpense = async (req, res) => {
  */
 exports.processRecurringExpense = async (req, res) => {
   try {
-    const workspace = await requireWorkspacePermission(req, "manage_expenses");
-    const template = await Expense.findOne({
-      _id: req.params.id,
-      ...buildWorkspaceFilter(workspace, "user"),
-    });
+    const guestId = req.body.guestId || req.query.guestId;
+    let filter = { _id: req.params.id };
+
+    if (!req.user && guestId) {
+      filter.guestId = guestId;
+    } else {
+      const workspace = await requireWorkspacePermission(req, "manage_expenses");
+      filter = {
+        ...filter,
+        ...buildWorkspaceFilter(workspace, "user"),
+      };
+    }
+
+    const template = await Expense.findOne(filter);
 
     if (!template) {
       return res.status(404).json({ message: "Expense not found" });
@@ -492,11 +549,20 @@ exports.processVoiceExpense = async (req, res) => {
 // ─── DELETE /api/expenses/:id ────────────────────────────────────────────────
 exports.deleteExpense = async (req, res) => {
   try {
-    const workspace = await requireWorkspacePermission(req, "delete_expenses");
-    const expense = await Expense.findOne({
-      _id: req.params.id,
-      ...buildWorkspaceFilter(workspace, "user"),
-    });
+    const guestId = req.query.guestId;
+    let filter = { _id: req.params.id };
+
+    if (!req.user && guestId) {
+      filter.guestId = guestId;
+    } else {
+      const workspace = await requireWorkspacePermission(req, "delete_expenses");
+      filter = {
+        ...filter,
+        ...buildWorkspaceFilter(workspace, "user"),
+      };
+    }
+
+    const expense = await Expense.findOne(filter);
 
     if (!expense) {
       return res.status(404).json({ message: "Expense not found" });

@@ -5,6 +5,15 @@ const { buildWorkspaceFilter, requireWorkspacePermission, resolveMember } = requ
 // GET /api/incomes
 exports.getIncomes = async (req, res) => {
   try {
+    const guestId = req.query.guestId;
+
+    if (!req.user && guestId) {
+      const incomes = await Income.find({ guestId })
+        .populate("familyMember", "name relation")
+        .sort({ date: -1, createdAt: -1 });
+      return res.json(incomes);
+    }
+
     const workspace = await requireWorkspacePermission(req, "view_sheet");
     const incomes = await Income.find(buildWorkspaceFilter(workspace, "user"))
       .populate("familyMember", "name relation")
@@ -38,33 +47,47 @@ exports.createIncome = async (req, res) => {
   }
 
   try {
-    const workspace = await requireWorkspacePermission(req, "manage_income");
-    const ownerId = workspace.ownerId;
-    const resolvedMemberId = memberId || member;
+    const guestId = req.body.guestId;
+    let workspace = null;
+    let ownerId = null;
+    let sheetId = null;
     let selectedMember = null;
     let selectedUser = null;
-    let resolvedMemberName = req.user.name;
+    let resolvedMemberName = "Me";
 
-    if (resolvedMemberId === "self") {
-      selectedUser = req.user._id;
-      resolvedMemberName = req.user.name;
+    const resolvedMemberId = memberId || member;
+
+    if (!req.user && guestId) {
+       // Guest mode
+       resolvedMemberName = "Guest";
     } else {
-      const memberInfo = await resolveMember(resolvedMemberId, workspace, req.user);
-      if (!memberInfo) {
-        return res.status(400).json({ message: "Selected member is invalid" });
-      }
+      workspace = await requireWorkspacePermission(req, "manage_income");
+      ownerId = workspace.ownerId;
+      sheetId = workspace.sheetId;
+      resolvedMemberName = req.user.name;
 
-      if (memberInfo.type === "user") {
-        selectedUser = memberInfo.id;
+      if (resolvedMemberId === "self") {
+        selectedUser = req.user._id;
+        resolvedMemberName = req.user.name;
       } else {
-        selectedMember = memberInfo.id;
+        const memberInfo = await resolveMember(resolvedMemberId, workspace, req.user);
+        if (!memberInfo) {
+          return res.status(400).json({ message: "Selected member is invalid" });
+        }
+
+        if (memberInfo.type === "user") {
+          selectedUser = memberInfo.id;
+        } else {
+          selectedMember = memberInfo.id;
+        }
+        resolvedMemberName = memberInfo.name;
       }
-      resolvedMemberName = memberInfo.name;
     }
 
     const income = await Income.create({
-      sheet: workspace.sheetId,
+      sheet: sheetId,
       user: ownerId,
+      guestId: !req.user ? guestId : null,
       name,
       source: resolvedSource.trim(),
       amount: numericAmount,
@@ -91,8 +114,22 @@ exports.updateIncome = async (req, res) => {
   const resolvedMemberId = memberId || member;
 
   try {
-    const workspace = await requireWorkspacePermission(req, "manage_income");
-    const income = await Income.findOne({ _id: req.params.id, ...buildWorkspaceFilter(workspace, "user") });
+    const guestId = req.body.guestId || req.query.guestId;
+    const resolvedMemberId = memberId || member;
+    let filter = { _id: req.params.id };
+    let workspace = null;
+
+    if (!req.user && guestId) {
+      filter.guestId = guestId;
+    } else {
+      workspace = await requireWorkspacePermission(req, "manage_income");
+      filter = {
+        ...filter,
+        ...buildWorkspaceFilter(workspace, "user"),
+      };
+    }
+
+    const income = await Income.findOne(filter);
     if (!income) {
       return res.status(404).json({ message: "Income not found" });
     }
@@ -107,11 +144,11 @@ exports.updateIncome = async (req, res) => {
 
     // Handle "self" member like createIncome
     if (resolvedMemberId !== undefined) {
-      if (resolvedMemberId === "self") {
+      if (resolvedMemberId === "self" && req.user) {
         income.familyMember = null;
         income.assignedUser = req.user._id;
         income.familyMemberName = req.user.name;
-      } else {
+      } else if (resolvedMemberId !== "self" && workspace) {
         const memberInfo = await resolveMember(resolvedMemberId, workspace, req.user);
         if (!memberInfo) {
           return res.status(400).json({ message: "Selected member is invalid" });
@@ -125,6 +162,8 @@ exports.updateIncome = async (req, res) => {
           income.assignedUser = null;
         }
         income.familyMemberName = memberInfo.name;
+      } else if (!req.user && guestId) {
+        income.familyMemberName = "Guest";
       }
     }
 
@@ -139,12 +178,20 @@ exports.updateIncome = async (req, res) => {
 // DELETE /api/incomes/:id
 exports.deleteIncome = async (req, res) => {
   try {
-    const workspace = await requireWorkspacePermission(req, "delete_income");
-    const income = await Income.findOne({ _id: req.params.id, ...buildWorkspaceFilter(workspace, "user") });
+    const guestId = req.query.guestId;
+    let filter = { _id: req.params.id };
 
-    if (!income) {
-      return res.status(404).json({ message: "Income not found" });
+    if (!req.user && guestId) {
+      filter.guestId = guestId;
+    } else {
+      const workspace = await requireWorkspacePermission(req, "delete_income");
+      filter = {
+        ...filter,
+        ...buildWorkspaceFilter(workspace, "user"),
+      };
     }
+
+    const income = await Income.findOne(filter);
 
     await income.deleteOne();
     res.json({ message: "Income removed" });

@@ -1,6 +1,6 @@
 const mongoose = require("mongoose");
 
-const incomeSchema = new mongoose.Schema(
+const recurringTransactionSchema = new mongoose.Schema(
   {
     sheet: {
       type: mongoose.Schema.Types.ObjectId,
@@ -10,26 +10,30 @@ const incomeSchema = new mongoose.Schema(
     },
     user: {
       type: mongoose.Schema.Types.ObjectId,
-      required: function() { return !this.guestId; },
+      required: function () {
+        return !this.guestId;
+      },
       ref: "User",
       default: null,
+      index: true,
     },
     guestId: {
       type: String,
       default: null,
       index: true,
     },
-    recurringTransactionId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "RecurringTransaction",
-      default: null,
+    type: {
+      type: String,
+      enum: ["expense", "income"],
+      required: true,
     },
     name: {
       type: String,
       required: true,
       trim: true,
     },
-    source: {
+    category: {
+      // Maps to 'category' for Expense and 'source' for Income
       type: String,
       required: true,
       trim: true,
@@ -39,13 +43,9 @@ const incomeSchema = new mongoose.Schema(
       required: true,
       min: 0,
     },
-    date: {
-      type: Date,
-      required: true,
-    },
     method: {
       type: String,
-      default: "salary",
+      default: "upi",
       trim: true,
     },
     familyMember: {
@@ -53,14 +53,9 @@ const incomeSchema = new mongoose.Schema(
       ref: "FamilyMember",
       default: null,
     },
-    assignedUser: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      default: null,
-    },
     familyMemberName: {
       type: String,
-      required: true,
+      default: "Me",
       trim: true,
     },
     note: {
@@ -68,15 +63,34 @@ const incomeSchema = new mongoose.Schema(
       default: "",
       trim: true,
     },
-    recurring: {
+    frequency: {
+      type: String,
+      enum: ["daily", "weekly", "monthly", "yearly"],
+      required: true,
+    },
+    startDate: {
+      type: Date,
+      required: true,
+    },
+    endDate: {
+      type: Date,
+      default: null,
+    },
+    nextRunDate: {
+      type: Date,
+      required: true,
+      index: true, // Critical for efficient cron queries
+    },
+    isActive: {
       type: Boolean,
-      default: false,
+      default: true,
+      index: true,
     },
   },
   { timestamps: true }
 );
 
-incomeSchema.index({ sheet: 1, date: -1, createdAt: -1 });
+// Compound index for cron job
+recurringTransactionSchema.index({ isActive: 1, nextRunDate: 1 });
 
-module.exports = mongoose.model("Income", incomeSchema);
-
+module.exports = mongoose.model("RecurringTransaction", recurringTransactionSchema);
