@@ -72,6 +72,19 @@ const incomeSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    frequency: {
+      type: String,
+      enum: ["daily", "weekly", "monthly", "yearly"],
+      default: null,
+    },
+    nextDue: {
+      type: Date,
+      default: null,
+    },
+    recurringPaused: {
+      type: Boolean,
+      default: false,
+    },
   },
   { timestamps: true }
 );

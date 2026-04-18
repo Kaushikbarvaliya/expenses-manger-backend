@@ -1,5 +1,6 @@
 const Expense = require("../models/Expense");
 const FamilyMember = require("../models/FamilyMember");
+const RecurringTransaction = require("../models/RecurringTransaction");
 const { buildWorkspaceFilter, requireWorkspacePermission, resolveMember } = require("../utils/workspaceAccess");
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -15,6 +16,7 @@ function computeNextDue(baseDate, frequency) {
   if (isNaN(d.getTime())) return null;
 
   switch (frequency) {
+    case "daily": d.setDate(d.getDate() + 1); break;
     case "weekly": d.setDate(d.getDate() + 7); break;
     case "quarterly": d.setMonth(d.getMonth() + 3); break;
     case "yearly": d.setFullYear(d.getFullYear() + 1); break;
@@ -30,7 +32,7 @@ exports.computeNextDue = computeNextDue;
 // ─── GET /api/expenses ───────────────────────────────────────────────────────
 exports.getExpenses = async (req, res) => {
   try {
-    const guestId = req.query.guestId;
+    const guestId = req.guestId || req.query.guestId;
     
     if (!req.user && guestId) {
       const expenses = await Expense.find({ guestId })
@@ -58,7 +60,7 @@ exports.getExpenses = async (req, res) => {
  */
 exports.getRecurringExpenses = async (req, res) => {
   try {
-    const guestId = req.query.guestId;
+    const guestId = req.guestId || req.query.guestId;
     let filter;
 
     if (!req.user && guestId) {
@@ -136,7 +138,7 @@ exports.createExpense = async (req, res) => {
   }
 
   try {
-    const guestId = req.body.guestId;
+    const guestId = req.guestId || req.body.guestId;
     let workspace = null;
     let ownerId = null;
     let sheetId = null;
@@ -147,7 +149,7 @@ exports.createExpense = async (req, res) => {
     if (!req.user && guestId) {
       // Guest mode - no workspace/ownerId
       resolvedMemberName = "Guest";
-    } else {
+    } else if (req.user) {
       workspace = await requireWorkspacePermission(req, "manage_expenses");
       ownerId = workspace.ownerId;
       sheetId = workspace.sheetId;
@@ -171,6 +173,7 @@ exports.createExpense = async (req, res) => {
       }
     }
 
+    const nextDue = isRecurring ? computeNextDue(date, resolvedFrequency) : null;
     const expense = await Expense.create({
       sheet: sheetId,
       user: ownerId,
@@ -186,9 +189,30 @@ exports.createExpense = async (req, res) => {
       note,
       recurring: isRecurring,
       frequency: resolvedFrequency,
-      nextDue: isRecurring ? computeNextDue(date, resolvedFrequency) : null,
+      nextDue,
       recurringPaused: false,
     });
+
+    // If recurring is enabled, create a RecurringTransaction (the schedule/template)
+    if (isRecurring) {
+      await RecurringTransaction.create({
+        sheet: sheetId,
+        user: ownerId,
+        guestId: !req.user ? guestId : null,
+        type: "expense",
+        name: expense.name,
+        category: expense.category,
+        amount: expense.amount,
+        frequency: resolvedFrequency,
+        startDate: expense.date,
+        nextRunDate: nextDue,
+        familyMember: expense.familyMember,
+        familyMemberName: expense.familyMemberName,
+        method: expense.method,
+        note: expense.note,
+        isActive: true
+      });
+    }
 
     const populatedExpense = await expense.populate("familyMember", "name relation");
     res.status(201).json(populatedExpense);
@@ -215,13 +239,13 @@ exports.updateExpense = async (req, res) => {
   }
 
   try {
-    const guestId = req.body.guestId || req.query.guestId;
+    const guestId = req.guestId || req.body.guestId || req.query.guestId;
     let filter = { _id: req.params.id };
     let workspace = null;
 
     if (!req.user && guestId) {
       filter.guestId = guestId;
-    } else {
+    } else if (req.user) {
       workspace = await requireWorkspacePermission(req, "manage_expenses");
       filter = {
         ...filter,
@@ -515,14 +539,15 @@ exports.processVoiceExpense = async (req, res) => {
     const expense = await Expense.create({
       sheet: workspace.sheetId,
       user: ownerId,
+      guestId: !req.user ? (req.guestId || req.body.guestId || req.query.guestId) : null,
       name,
       category: detectedCategory.toLowerCase(),
       amount,
       date,
       method: "upi",
       familyMember: null,
-      assignedUser: req.user._id,
-      familyMemberName: req.user.name,
+      assignedUser: req.user ? req.user._id : null,
+      familyMemberName: req.user ? req.user.name : "Guest",
       note: `Added via voice: "${transcript}"`,
       recurring: false,
     });
@@ -549,12 +574,12 @@ exports.processVoiceExpense = async (req, res) => {
 // ─── DELETE /api/expenses/:id ────────────────────────────────────────────────
 exports.deleteExpense = async (req, res) => {
   try {
-    const guestId = req.query.guestId;
+    const guestId = req.guestId || req.query.guestId;
     let filter = { _id: req.params.id };
 
     if (!req.user && guestId) {
       filter.guestId = guestId;
-    } else {
+    } else if (req.user) {
       const workspace = await requireWorkspacePermission(req, "delete_expenses");
       filter = {
         ...filter,

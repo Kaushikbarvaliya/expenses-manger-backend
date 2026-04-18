@@ -77,7 +77,7 @@ const expenseSchema = new mongoose.Schema(
     },
     frequency: {
       type: String,
-      enum: ["weekly", "monthly", "quarterly", "yearly"],
+      enum: ["daily", "weekly", "monthly", "quarterly", "yearly"],
       default: null,
     },
     nextDue: {

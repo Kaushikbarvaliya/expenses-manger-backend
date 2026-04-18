@@ -1,4 +1,9 @@
 const RecurringTransaction = require("../models/RecurringTransaction");
+const { 
+  buildWorkspaceFilter, 
+  requireWorkspacePermission, 
+  resolveWorkspaceContext 
+} = require("../utils/workspaceAccess");
 
 const VALID_FREQUENCIES = ["daily", "weekly", "monthly", "yearly"];
 
@@ -54,10 +59,21 @@ exports.createRecurringTransaction = async (req, res) => {
       return res.status(400).json({ message: "User must be authenticated or provide a guestId" });
     }
 
+    let workspace;
+    let ownerId;
+    let sheetId;
+
+    if (req.user) {
+        workspace = await requireWorkspacePermission(req, "manage_expenses");
+        ownerId = workspace.ownerId;
+        sheetId = workspace.sheetId;
+    }
+
     const nextRunDate = computeNextDue(startDate, frequency);
 
     const recurringTransaction = await RecurringTransaction.create({
-      user: req.user ? req.user._id : null,
+      sheet: sheetId || null,
+      user: ownerId || null,
       guestId: !req.user ? guestId : null,
       type,
       name: title,
@@ -74,7 +90,7 @@ exports.createRecurringTransaction = async (req, res) => {
 
     res.status(201).json(recurringTransaction);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
@@ -82,21 +98,18 @@ exports.getRecurringTransactions = async (req, res) => {
   try {
     const guestId = req.query.guestId;
 
-    if (!req.user && !guestId) {
-      return res.status(400).json({ message: "User must be authenticated or provide a guestId query param" });
+    if (!req.user && guestId) {
+      const transactions = await RecurringTransaction.find({ guestId }).sort({ createdAt: -1 });
+      return res.json(transactions);
     }
 
-    const filter = {};
-    if (req.user) {
-      filter.user = req.user._id;
-    } else {
-      filter.guestId = guestId;
-    }
+    const workspace = await requireWorkspacePermission(req, "view_sheet");
+    const filter = buildWorkspaceFilter(workspace, "user");
 
     const transactions = await RecurringTransaction.find(filter).sort({ createdAt: -1 });
     res.json(transactions);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
@@ -107,10 +120,18 @@ exports.updateRecurringTransaction = async (req, res) => {
 
     const guestId = req.body.guestId || req.query.guestId;
 
-    const filter = { _id: id };
-    if (req.user) filter.user = req.user._id;
-    else if (guestId) filter.guestId = guestId;
-    else return res.status(400).json({ message: "Not authorized or missing guestId" });
+    let filter = { _id: id };
+    if (!req.user && guestId) {
+        filter.guestId = guestId;
+    } else if (req.user) {
+        const workspace = await requireWorkspacePermission(req, "manage_expenses");
+        filter = {
+            ...filter,
+            ...buildWorkspaceFilter(workspace, "user")
+        };
+    } else {
+        return res.status(400).json({ message: "Not authorized or missing guestId" });
+    }
 
     const transaction = await RecurringTransaction.findOne(filter);
 
@@ -151,10 +172,18 @@ exports.deleteRecurringTransaction = async (req, res) => {
     const { id } = req.params;
     const guestId = req.query.guestId;
 
-    const filter = { _id: id };
-    if (req.user) filter.user = req.user._id;
-    else if (guestId) filter.guestId = guestId;
-    else return res.status(400).json({ message: "Not authorized or missing guestId" });
+    let filter = { _id: id };
+    if (!req.user && guestId) {
+        filter.guestId = guestId;
+    } else if (req.user) {
+        const workspace = await requireWorkspacePermission(req, "manage_expenses");
+        filter = {
+            ...filter,
+            ...buildWorkspaceFilter(workspace, "user")
+        };
+    } else {
+        return res.status(400).json({ message: "Not authorized or missing guestId" });
+    }
 
     const transaction = await RecurringTransaction.findOne(filter);
     if (!transaction) {
@@ -173,10 +202,18 @@ exports.toggleRecurringTransaction = async (req, res) => {
     const { id } = req.params;
     const guestId = req.body.guestId || req.query.guestId;
 
-    const filter = { _id: id };
-    if (req.user) filter.user = req.user._id;
-    else if (guestId) filter.guestId = guestId;
-    else return res.status(400).json({ message: "Not authorized or missing guestId" });
+    let filter = { _id: id };
+    if (!req.user && guestId) {
+        filter.guestId = guestId;
+    } else if (req.user) {
+        const workspace = await requireWorkspacePermission(req, "manage_expenses");
+        filter = {
+            ...filter,
+            ...buildWorkspaceFilter(workspace, "user")
+        };
+    } else {
+        return res.status(400).json({ message: "Not authorized or missing guestId" });
+    }
 
     const transaction = await RecurringTransaction.findOne(filter);
     if (!transaction) {
@@ -186,12 +223,12 @@ exports.toggleRecurringTransaction = async (req, res) => {
     transaction.isActive = !transaction.isActive;
     
     // If resuming and nextRunDate is passed, recalculate it based on today
-    if (transaction.isActive) {
-        const today = new Date().toISOString().slice(0, 10);
-        const nextRun = new Date(transaction.nextRunDate).toISOString().slice(0,10);
+    if (transaction.isActive && transaction.nextRunDate) {
+        const todayStr = new Date().toISOString().slice(0, 10);
+        const nextRunStr = new Date(transaction.nextRunDate).toISOString().slice(0,10);
         
-        if (nextRun < today) {
-            transaction.nextRunDate = computeNextDue(today, transaction.frequency);
+        if (nextRunStr < todayStr) {
+            transaction.nextRunDate = computeNextDue(todayStr, transaction.frequency);
         }
     }
 

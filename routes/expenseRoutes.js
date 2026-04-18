@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 
-const protect = require("../middleware/authMiddleware");
+const optionalProtect = require("../middleware/optionalProtect");
 
 const {
   getExpenses,
@@ -11,10 +11,10 @@ const {
   processVoiceExpense,
 } = require("../controllers/expenseController");
 
-router.route("/").get(protect, getExpenses).post(protect, createExpense);
-router.post("/voice", protect, processVoiceExpense);
+router.route("/").get(optionalProtect, getExpenses).post(optionalProtect, createExpense);
+router.post("/voice", optionalProtect, processVoiceExpense);
 router.route("/:id")
-  .put(protect, updateExpense)
-  .delete(protect, deleteExpense);
+  .put(optionalProtect, updateExpense)
+  .delete(optionalProtect, deleteExpense);
 
 module.exports = router;

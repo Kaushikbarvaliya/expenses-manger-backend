@@ -1,11 +1,29 @@
 const Income = require("../models/Income");
 const FamilyMember = require("../models/FamilyMember");
+const RecurringTransaction = require("../models/RecurringTransaction");
 const { buildWorkspaceFilter, requireWorkspacePermission, resolveMember } = require("../utils/workspaceAccess");
+
+const VALID_FREQUENCIES = ["daily", "weekly", "monthly", "yearly"];
+
+function computeNextDue(baseDate, frequency) {
+  const d = new Date(baseDate);
+  if (isNaN(d.getTime())) return null;
+
+  switch (frequency) {
+    case "daily": d.setDate(d.getDate() + 1); break;
+    case "weekly": d.setDate(d.getDate() + 7); break;
+    case "yearly": d.setFullYear(d.getFullYear() + 1); break;
+    case "monthly":
+    default: d.setMonth(d.getMonth() + 1); break;
+  }
+
+  return d.toISOString().slice(0, 10);
+}
 
 // GET /api/incomes
 exports.getIncomes = async (req, res) => {
   try {
-    const guestId = req.query.guestId;
+    const guestId = req.guestId || req.query.guestId;
 
     if (!req.user && guestId) {
       const incomes = await Income.find({ guestId })
@@ -26,7 +44,7 @@ exports.getIncomes = async (req, res) => {
 
 // POST /api/incomes
 exports.createIncome = async (req, res) => {
-  const { name, source, amount, date, method, member, memberId, note, recurring } = req.body;
+  const { name, source, amount, date, method, member, memberId, note, recurring, frequency } = req.body;
   const resolvedSource = source;
 
   if (!name || !resolvedSource || amount === undefined || !date) {
@@ -46,6 +64,13 @@ exports.createIncome = async (req, res) => {
     return res.status(400).json({ message: "amount must be a positive number" });
   }
 
+  const isRecurring = Boolean(recurring);
+  const resolvedFrequency = frequency || "monthly";
+
+  if (isRecurring && !VALID_FREQUENCIES.includes(resolvedFrequency)) {
+    return res.status(400).json({ message: `Invalid frequency. Must be one of: ${VALID_FREQUENCIES.join(", ")}` });
+  }
+
   try {
     const guestId = req.body.guestId;
     let workspace = null;
@@ -60,7 +85,7 @@ exports.createIncome = async (req, res) => {
     if (!req.user && guestId) {
        // Guest mode
        resolvedMemberName = "Guest";
-    } else {
+    } else if (req.user) {
       workspace = await requireWorkspacePermission(req, "manage_income");
       ownerId = workspace.ownerId;
       sheetId = workspace.sheetId;
@@ -84,6 +109,10 @@ exports.createIncome = async (req, res) => {
       }
     }
 
+    const isRecurring = Boolean(recurring);
+    const resolvedFrequency = frequency || "monthly";
+    const nextDue = isRecurring ? computeNextDue(date, resolvedFrequency) : null;
+
     const income = await Income.create({
       sheet: sheetId,
       user: ownerId,
@@ -97,8 +126,29 @@ exports.createIncome = async (req, res) => {
       assignedUser: selectedUser || null,
       familyMemberName: resolvedMemberName,
       note: note || "",
-      recurring: Boolean(recurring),
+      recurring: isRecurring,
     });
+
+    // If recurring is enabled, create a RecurringTransaction entry
+    if (isRecurring) {
+        await RecurringTransaction.create({
+            sheet: sheetId,
+            user: ownerId,
+            guestId: !req.user ? guestId : null,
+            type: "income",
+            name: income.name,
+            category: income.source,
+            amount: income.amount,
+            frequency: resolvedFrequency,
+            startDate: income.date,
+            nextRunDate: nextDue,
+            familyMember: income.familyMember,
+            familyMemberName: income.familyMemberName,
+            method: income.method,
+            note: income.note,
+            isActive: true
+        });
+    }
 
     const populatedIncome = await income.populate("familyMember", "name relation");
 
@@ -114,14 +164,14 @@ exports.updateIncome = async (req, res) => {
   const resolvedMemberId = memberId || member;
 
   try {
-    const guestId = req.body.guestId || req.query.guestId;
+    const guestId = req.guestId || req.body.guestId || req.query.guestId;
     const resolvedMemberId = memberId || member;
     let filter = { _id: req.params.id };
     let workspace = null;
 
     if (!req.user && guestId) {
       filter.guestId = guestId;
-    } else {
+    } else if (req.user) {
       workspace = await requireWorkspacePermission(req, "manage_income");
       filter = {
         ...filter,
@@ -178,12 +228,12 @@ exports.updateIncome = async (req, res) => {
 // DELETE /api/incomes/:id
 exports.deleteIncome = async (req, res) => {
   try {
-    const guestId = req.query.guestId;
+    const guestId = req.guestId || req.query.guestId;
     let filter = { _id: req.params.id };
 
     if (!req.user && guestId) {
       filter.guestId = guestId;
-    } else {
+    } else if (req.user) {
       const workspace = await requireWorkspacePermission(req, "delete_income");
       filter = {
         ...filter,

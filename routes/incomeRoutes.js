@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 
-const protect = require("../middleware/authMiddleware");
+const optionalProtect = require("../middleware/optionalProtect");
 
 const {
   getIncomes,
@@ -10,10 +10,10 @@ const {
   deleteIncome,
 } = require("../controllers/incomeController");
 
-router.route("/").get(protect, getIncomes).post(protect, createIncome);
+router.route("/").get(optionalProtect, getIncomes).post(optionalProtect, createIncome);
 router.route("/:id")
-  .put(protect, updateIncome)
-  .delete(protect, deleteIncome);
+  .put(optionalProtect, updateIncome)
+  .delete(optionalProtect, deleteIncome);
 
 module.exports = router;
 

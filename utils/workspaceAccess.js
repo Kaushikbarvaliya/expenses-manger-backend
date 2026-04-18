@@ -53,8 +53,20 @@ function buildWorkspaceFilter(context, legacyOwnerField = "user") {
 
 async function resolveWorkspaceContext(req) {
   const requestedSheetId = String(req.query.sheetId || req.query.sheetOwnerId || "").trim();
-  const currentUserId = String(req.user._id);
+
+  if (!req.user) {
+    // Guest mode
+    return {
+      sheetId: null,
+      ownerId: null,
+      role: "owner", // Guest owns their own data
+      isOwner: true,
+      isLegacyBackedDefault: false,
+    };
+  }
+
   const defaultSheet = await getOrCreateDefaultSheet(req.user);
+  const currentUserId = String(req.user._id);
 
   if (!requestedSheetId) {
     return {

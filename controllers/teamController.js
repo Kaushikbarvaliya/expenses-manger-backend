@@ -3,6 +3,11 @@ const Sheet = require("../models/Sheet");
 const TeamInvite = require("../models/TeamInvite");
 const SharedAccess = require("../models/SharedAccess");
 const User = require("../models/User");
+const Expense = require("../models/Expense");
+const Income = require("../models/Income");
+const Budget = require("../models/Budget");
+const RecurringTransaction = require("../models/RecurringTransaction");
+const FamilyMember = require("../models/FamilyMember");
 const sendOtpEmail = require("../utils/sendOtpEmail");
 const { getOrCreateDefaultSheet, requireWorkspacePermission } = require("../utils/workspaceAccess");
 
@@ -249,5 +254,73 @@ exports.acceptInvite = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: error.message || "Failed to accept invite" });
+  }
+};
+
+exports.updateSheet = async (req, res) => {
+  const { id } = req.params;
+  const { name, description } = req.body;
+
+  try {
+    const sheet = await Sheet.findById(id);
+    if (!sheet) {
+      return res.status(404).json({ message: "Sheet not found" });
+    }
+
+    if (String(sheet.owner) !== String(req.user._id)) {
+      return res.status(403).json({ message: "You are not the owner of this sheet" });
+    }
+
+    if (name) sheet.name = name;
+    if (description !== undefined) sheet.description = description;
+
+    await sheet.save();
+
+    res.json({
+      sheetId: sheet._id,
+      sheetName: sheet.name,
+      description: sheet.description,
+      isDefault: sheet.isDefault,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message || "Failed to update sheet" });
+  }
+};
+
+exports.deleteSheet = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const sheet = await Sheet.findById(id);
+    if (!sheet) {
+      return res.status(404).json({ message: "Sheet not found" });
+    }
+
+    if (String(sheet.owner) !== String(req.user._id)) {
+      return res.status(403).json({ message: "You are not the owner of this sheet" });
+    }
+
+    if (sheet.isDefault) {
+      return res.status(400).json({ message: "You cannot delete your default sheet" });
+    }
+
+    // 1. Delete all related data
+    const sheetId = sheet._id;
+    await Promise.all([
+      Expense.deleteMany({ sheet: sheetId }),
+      Income.deleteMany({ sheet: sheetId }),
+      Budget.deleteMany({ sheet: sheetId }),
+      RecurringTransaction.deleteMany({ sheet: sheetId }),
+      FamilyMember.deleteMany({ sheet: sheetId }),
+      SharedAccess.deleteMany({ sheet: sheetId }),
+      TeamInvite.deleteMany({ sheet: sheetId }),
+    ]);
+
+    // 2. Delete the sheet itself
+    await Sheet.findByIdAndDelete(sheetId);
+
+    res.json({ message: "Sheet and all associated data deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ message: error.message || "Failed to delete sheet" });
   }
 };

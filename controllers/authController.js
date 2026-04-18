@@ -3,6 +3,8 @@ const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const generateToken = require("../utils/generateToken");
 const sendOtpEmail = require("../utils/sendOtpEmail");
+const { getOrCreateDefaultSheet } = require("../utils/workspaceAccess");
+const mongoose = require("mongoose");
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -398,7 +400,17 @@ exports.mergeGuestData = async (req, res) => {
 
     const Expense = require("../models/Expense");
     const Income = require("../models/Income");
-    const FamilyMember = require("../models/FamilyMember");
+    const RecurringTransaction = require("../models/RecurringTransaction");
+
+    // Robust sheetId resolution
+    let finalSheetId = null;
+    if (sheetId && mongoose.Types.ObjectId.isValid(sheetId)) {
+      finalSheetId = new mongoose.Types.ObjectId(sheetId);
+    } else {
+      // If no valid sheetId provided, use the user's default sheet
+      const defaultSheet = await getOrCreateDefaultSheet(req.user);
+      finalSheetId = defaultSheet._id;
+    }
 
     const results = {
       expensesMerged: 0,
@@ -415,15 +427,15 @@ exports.mergeGuestData = async (req, res) => {
        
        const recurringRes = await RecurringTransaction.updateMany(
          { guestId },
-         { $set: { user: userId, guestId: null } }
+         { $set: { user: userId, sheet: finalSheetId, guestId: null } }
        );
        const expenseRes = await Expense.updateMany(
          { guestId },
-         { $set: { user: userId, guestId: null } }
+         { $set: { user: userId, sheet: finalSheetId, guestId: null } }
        );
        const incomeRes = await Income.updateMany(
          { guestId },
-         { $set: { user: userId, guestId: null } }
+         { $set: { user: userId, sheet: finalSheetId, guestId: null } }
        );
 
        results.backendRecordsMerged = (recurringRes.modifiedCount || recurringRes.nModified || 0) + 
@@ -431,103 +443,48 @@ exports.mergeGuestData = async (req, res) => {
                                       (incomeRes.modifiedCount || incomeRes.nModified || 0);
     }
 
-    // Helper function to check for duplicates using UUID
-    const isDuplicateExpense = async (expense, userId) => {
-      // First check if there's an existing expense with the same UUID (for re-merge scenarios)
-      if (expense._id) {
-        const existingByUuid = await Expense.findOne({
-          user: userId,
-          _id: expense._id
-        });
-        if (existingByUuid) return true;
-      }
-
-      // Then check for duplicates using UUID-based logic
-      const duplicate = await Expense.findOne({
-        user: userId,
-        name: expense.name,
-        amount: expense.amount,
-        category: expense.category,
-        date: new Date(expense.date)
-      });
-
-      return duplicate !== null;
-    };
-
-    const isDuplicateIncome = async (income, userId) => {
-      // First check if there's an existing income with the same UUID (for re-merge scenarios)
-      if (income._id) {
-        const existingByUuid = await Income.findOne({
-          user: userId,
-          _id: income._id
-        });
-        if (existingByUuid) return true;
-      }
-
-      // Then check for duplicates using UUID-based logic
-      const duplicate = await Income.findOne({
-        user: userId,
-        name: income.name,
-        amount: income.amount,
-        source: income.source,
-        date: new Date(income.date)
-      });
-
-      return duplicate !== null;
-    };
-
     // Process guest expenses
     if (guestExpenses && Array.isArray(guestExpenses)) {
       for (const guestExpense of guestExpenses) {
         try {
-          // Validate expense data
-          if (!guestExpense.name || typeof guestExpense.name !== 'string' || guestExpense.name.trim() === '') {
-            results.errors.push(`Skipping expense: name is required`);
-            continue;
-          }
-          if (!guestExpense.category || typeof guestExpense.category !== 'string' || guestExpense.category.trim() === '') {
-            results.errors.push(`Skipping expense "${guestExpense.name}": category is required`);
-            continue;
-          }
-          if (!guestExpense.amount || typeof guestExpense.amount !== 'number' || guestExpense.amount <= 0) {
-            results.errors.push(`Skipping expense "${guestExpense.name}": amount must be a positive number`);
-            continue;
-          }
-          if (!guestExpense.date || !Date.parse(guestExpense.date)) {
-            results.errors.push(`Skipping expense "${guestExpense.name}": valid date is required`);
+          // Validate required fields
+          if (!guestExpense.name || guestExpense.amount === undefined || !guestExpense.date) {
+            results.errors.push(`Skipping expense: missing required fields`);
             continue;
           }
 
-          // Check if expense already exists
-          const isDuplicate = await isDuplicateExpense(guestExpense, userId);
-          if (isDuplicate) {
-            results.expensesSkipped++;
-            continue;
-          }
-
-          // Create new expense with preserved UUID
           const expenseData = {
-            _id: guestExpense._id, // Preserve UUID from guest data
             user: userId,
-            sheet: sheetId || null,
+            sheet: finalSheetId,
             name: guestExpense.name,
-            category: guestExpense.category,
-            amount: guestExpense.amount,
+            category: (guestExpense.category || guestExpense.cat || "others").toLowerCase(),
+            amount: Number(guestExpense.amount),
             date: new Date(guestExpense.date),
             method: guestExpense.method || "upi",
             familyMemberName: guestExpense.familyMemberName || req.user.name,
+            note: guestExpense.note || "",
             recurring: guestExpense.recurring || false,
-            note: guestExpense.note || ""
           };
 
-          // Handle recurring expenses
-          if (guestExpense.recurring && guestExpense.frequency) {
-            expenseData.frequency = guestExpense.frequency;
+          if (guestExpense.recurring) {
+            expenseData.frequency = guestExpense.frequency || "monthly";
             expenseData.nextDue = guestExpense.nextDue ? new Date(guestExpense.nextDue) : null;
-            expenseData.recurringPaused = guestExpense.recurringPaused || false;
           }
 
-          await Expense.create(expenseData);
+          // Use upsert to handle cases where the transaction might already exist (e.g., partial previous merge)
+          // We use the guest data's _id (UUID) as our primary way to prevent duplicates during merge.
+          if (guestExpense._id) {
+            await Expense.findOneAndUpdate(
+              { 
+                _id: guestExpense._id, 
+                $or: [{ user: userId }, { guestId: guestId }] 
+              },
+              { $set: expenseData },
+              { upsert: true, new: true, setDefaultsOnInsert: true }
+            );
+          } else {
+            await Expense.create(expenseData);
+          }
           results.expensesMerged++;
         } catch (error) {
           results.errors.push(`Failed to merge expense "${guestExpense.name}": ${error.message}`);
@@ -539,46 +496,35 @@ exports.mergeGuestData = async (req, res) => {
     if (guestIncomes && Array.isArray(guestIncomes)) {
       for (const guestIncome of guestIncomes) {
         try {
-          // Validate income data
-          if (!guestIncome.name || typeof guestIncome.name !== 'string' || guestIncome.name.trim() === '') {
-            results.errors.push(`Skipping income: name is required`);
-            continue;
-          }
-          if (!guestIncome.source || typeof guestIncome.source !== 'string' || guestIncome.source.trim() === '') {
-            results.errors.push(`Skipping income "${guestIncome.name}": source is required`);
-            continue;
-          }
-          if (!guestIncome.amount || typeof guestIncome.amount !== 'number' || guestIncome.amount <= 0) {
-            results.errors.push(`Skipping income "${guestIncome.name}": amount must be a positive number`);
-            continue;
-          }
-          if (!guestIncome.date || !Date.parse(guestIncome.date)) {
-            results.errors.push(`Skipping income "${guestIncome.name}": valid date is required`);
+          if (!guestIncome.name || guestIncome.amount === undefined || !guestIncome.date) {
+            results.errors.push(`Skipping income: missing required fields`);
             continue;
           }
 
-          // Check if income already exists
-          const isDuplicate = await isDuplicateIncome(guestIncome, userId);
-          if (isDuplicate) {
-            results.incomesSkipped++;
-            continue;
-          }
-
-          // Create new income with preserved UUID
           const incomeData = {
-            _id: guestIncome._id, // Preserve UUID from guest data
             user: userId,
-            sheet: sheetId || null,
+            sheet: finalSheetId,
             name: guestIncome.name,
-            source: guestIncome.source,
-            amount: guestIncome.amount,
+            source: (guestIncome.source || "others").toLowerCase(),
+            amount: Number(guestIncome.amount),
             date: new Date(guestIncome.date),
             method: guestIncome.method || "upi",
             familyMemberName: guestIncome.familyMemberName || req.user.name,
             note: guestIncome.note || ""
           };
 
-          await Income.create(incomeData);
+          if (guestIncome._id) {
+            await Income.findOneAndUpdate(
+              { 
+                _id: guestIncome._id, 
+                $or: [{ user: userId }, { guestId: guestId }] 
+              },
+              { $set: incomeData },
+              { upsert: true, new: true, setDefaultsOnInsert: true }
+            );
+          } else {
+            await Income.create(incomeData);
+          }
           results.incomesMerged++;
         } catch (error) {
           results.errors.push(`Failed to merge income "${guestIncome.name}": ${error.message}`);
