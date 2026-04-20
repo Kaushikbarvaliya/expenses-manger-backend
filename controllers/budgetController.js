@@ -18,15 +18,32 @@ exports.getAllBudgets = async (req, res) => {
 // POST /api/budgets
 // Create or update a budget for a specific period (monthly or yearly).
 exports.upsertBudget = async (req, res) => {
-  const { periodType, month, year, totalBudget, categories } = req.body;
+  // Only extract the fields the backend actually uses — ignore amount, periodValue, dayFilter, etc.
+  const { month, year, totalBudget, categories } = req.body;
+  let { periodType } = req.body;
+
+  // --- Normalize periodType ---
+  // Accept common variants case-insensitively and map to canonical values
+  if (typeof periodType === "string") {
+    const normalized = periodType.trim().toLowerCase();
+    if (normalized === "month" || normalized === "monthly") {
+      periodType = "monthly";
+    } else if (normalized === "year" || normalized === "yearly" || normalized === "annual") {
+      periodType = "yearly";
+    } else {
+      periodType = normalized; // will fail the validation below
+    }
+  }
 
   // --- Validation ---
   if (!periodType || !year || totalBudget === undefined) {
     return res.status(400).json({ message: "periodType, year and totalBudget are required" });
   }
 
-  if (!["monthly", "yearly"].includes(periodType)) {
-    return res.status(400).json({ message: "periodType must be 'monthly' or 'yearly'" });
+  if (periodType !== "monthly" && periodType !== "yearly") {
+    return res.status(400).json({
+      message: "periodType must be either 'monthly' or 'yearly'",
+    });
   }
 
   const numericYear = Number(year);
