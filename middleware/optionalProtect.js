@@ -38,7 +38,7 @@ const optionalProtect = async (req, res, next) => {
   }
 
   // 3. Neither present
-  return res.status(401).json({ message: "Not authorized. Login or provide a guest ID." });
+  return res.status(401).json({ message: "Not authorized, no token (O)" });
 };
 
 module.exports = optionalProtect;
