@@ -19,6 +19,11 @@ const expenseSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    localId: {
+      type: String,
+      default: null,
+      index: true,
+    },
     recurringTransactionId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "RecurringTransaction",

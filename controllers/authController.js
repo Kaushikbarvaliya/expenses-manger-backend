@@ -1,4 +1,9 @@
 const User = require("../models/User");
+const Expense = require("../models/Expense");
+const Income = require("../models/Income");
+const RecurringTransaction = require("../models/RecurringTransaction");
+const TeamInvite = require("../models/TeamInvite");
+const SharedAccess = require("../models/SharedAccess");
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const generateToken = require("../utils/generateToken");
@@ -39,8 +44,6 @@ async function validateResetOtp(user, otp) {
 async function autoAcceptInvitesForEmail(user) {
   if (!user.email) return 0;
 
-  const TeamInvite = require("../models/TeamInvite");
-  const SharedAccess = require("../models/SharedAccess");
   const email = normalizeEmail(user.email);
   const now = new Date();
 
@@ -376,6 +379,7 @@ exports.resetPasswordWithOtp = async (req, res) => {
 
 // Merge guest data with user account
 exports.mergeGuestData = async (req, res) => {
+  console.log(`[Merge] Starting merge for user: ${req.user.email} (${req.user._id})`);
   try {
     const { guestExpenses, guestIncomes, guestId, sheetId } = req.body;
     const userId = req.user._id;
@@ -385,160 +389,120 @@ exports.mergeGuestData = async (req, res) => {
       return res.status(400).json({ message: "No guest data provided" });
     }
 
-    if (guestExpenses && !Array.isArray(guestExpenses)) {
-      return res.status(400).json({ message: "guestExpenses must be an array" });
-    }
-
-    if (guestIncomes && !Array.isArray(guestIncomes)) {
-      return res.status(400).json({ message: "guestIncomes must be an array" });
-    }
-
-    // Validate sheetId if provided
-    if (sheetId && (typeof sheetId !== 'string' || sheetId.trim() === '')) {
-      return res.status(400).json({ message: "sheetId must be a valid string" });
-    }
-
-    const Expense = require("../models/Expense");
-    const Income = require("../models/Income");
-    const RecurringTransaction = require("../models/RecurringTransaction");
-
     // Robust sheetId resolution
     let finalSheetId = null;
     if (sheetId && mongoose.Types.ObjectId.isValid(sheetId)) {
       finalSheetId = new mongoose.Types.ObjectId(sheetId);
     } else {
-      // If no valid sheetId provided, use the user's default sheet
       const defaultSheet = await getOrCreateDefaultSheet(req.user);
       finalSheetId = defaultSheet._id;
     }
+    console.log(`[Merge] Target sheet: ${finalSheetId}`);
 
     const results = {
       expensesMerged: 0,
-      expensesSkipped: 0,
       incomesMerged: 0,
-      incomesSkipped: 0,
       backendRecordsMerged: 0,
       errors: []
     };
 
-    // If a guestId string was provided, update any records created on the backend as a guest
+    // 1. Update existing backend records that have a guestId
     if (guestId) {
-       const RecurringTransaction = require("../models/RecurringTransaction");
-       
-       const recurringRes = await RecurringTransaction.updateMany(
-         { guestId },
-         { $set: { user: userId, sheet: finalSheetId, guestId: null } }
-       );
-       const expenseRes = await Expense.updateMany(
-         { guestId },
-         { $set: { user: userId, sheet: finalSheetId, guestId: null } }
-       );
-       const incomeRes = await Income.updateMany(
-         { guestId },
-         { $set: { user: userId, sheet: finalSheetId, guestId: null } }
-       );
+       console.log(`[Merge] Updating backend records with guestId: ${guestId}`);
+       const [recurringRes, expenseRes, incomeRes] = await Promise.all([
+         RecurringTransaction.updateMany({ guestId }, { $set: { user: userId, sheet: finalSheetId, guestId: null } }),
+         Expense.updateMany({ guestId }, { $set: { user: userId, sheet: finalSheetId, guestId: null } }),
+         Income.updateMany({ guestId }, { $set: { user: userId, sheet: finalSheetId, guestId: null } })
+       ]);
 
-       results.backendRecordsMerged = (recurringRes.modifiedCount || recurringRes.nModified || 0) + 
-                                      (expenseRes.modifiedCount || expenseRes.nModified || 0) + 
-                                      (incomeRes.modifiedCount || incomeRes.nModified || 0);
+       results.backendRecordsMerged = (recurringRes.modifiedCount || 0) + 
+                                      (expenseRes.modifiedCount || 0) + 
+                                      (incomeRes.modifiedCount || 0);
+       console.log(`[Merge] Backend records updated: ${results.backendRecordsMerged}`);
     }
 
-    // Process guest expenses
+    // 2. Process guest expenses from frontend
     if (guestExpenses && Array.isArray(guestExpenses)) {
-      for (const guestExpense of guestExpenses) {
+      console.log(`[Merge] Processing ${guestExpenses.length} frontend expenses`);
+      for (const guestExp of guestExpenses) {
         try {
-          // Validate required fields
-          if (!guestExpense.name || guestExpense.amount === undefined || !guestExpense.date) {
-            results.errors.push(`Skipping expense: missing required fields`);
-            continue;
-          }
+          if (!guestExp.name || guestExp.amount === undefined || !guestExp.date) continue;
 
           const expenseData = {
             user: userId,
             sheet: finalSheetId,
-            name: guestExpense.name,
-            category: (guestExpense.category || guestExpense.cat || "others").toLowerCase(),
-            amount: Number(guestExpense.amount),
-            date: new Date(guestExpense.date),
-            method: guestExpense.method || "upi",
-            familyMemberName: guestExpense.familyMemberName || req.user.name,
-            note: guestExpense.note || "",
-            recurring: guestExpense.recurring || false,
+            name: guestExp.name,
+            category: (guestExp.category || guestExp.cat || "others").toLowerCase(),
+            amount: Number(guestExp.amount),
+            date: new Date(guestExp.date),
+            method: guestExp.method || "upi",
+            familyMemberName: guestExp.familyMemberName || req.user.name,
+            note: guestExp.note || "",
+            recurring: guestExp.recurring || false,
+            localId: guestExp._id // Store the frontend UUID as localId
           };
 
-          if (guestExpense.recurring) {
-            expenseData.frequency = guestExpense.frequency || "monthly";
-            expenseData.nextDue = guestExpense.nextDue ? new Date(guestExpense.nextDue) : null;
+          if (guestExp.recurring) {
+            expenseData.frequency = guestExp.frequency || "monthly";
+            expenseData.nextDue = guestExp.nextDue ? new Date(guestExp.nextDue) : null;
           }
 
-          // Use upsert to handle cases where the transaction might already exist (e.g., partial previous merge)
-          // We use the guest data's _id (UUID) as our primary way to prevent duplicates during merge.
-          if (guestExpense._id && mongoose.Types.ObjectId.isValid(guestExpense._id)) {
-            await Expense.findOneAndUpdate(
-              { 
-                _id: guestExpense._id, 
-                $or: [{ user: userId }, { guestId: guestId }] 
-              },
-              { $set: expenseData },
-              { upsert: true, new: true, setDefaultsOnInsert: true }
-            );
-          } else {
-            await Expense.create(expenseData);
+          // Duplicate prevention logic:
+          // Check if localId already exists for this user OR if it's a valid ObjectId we can update
+          let query = { user: userId, localId: guestExp._id };
+          
+          if (mongoose.Types.ObjectId.isValid(guestExp._id)) {
+            query = { _id: guestExp._id };
           }
+
+          await Expense.findOneAndUpdate(query, { $set: expenseData }, { upsert: true, new: true });
           results.expensesMerged++;
         } catch (error) {
-          results.errors.push(`Failed to merge expense "${guestExpense.name}": ${error.message}`);
+          console.error(`[Merge] Expense error (${guestExp.name}):`, error.message);
+          results.errors.push(`Expense "${guestExp.name}": ${error.message}`);
         }
       }
     }
 
-    // Process guest incomes
+    // 3. Process guest incomes from frontend
     if (guestIncomes && Array.isArray(guestIncomes)) {
-      for (const guestIncome of guestIncomes) {
+      console.log(`[Merge] Processing ${guestIncomes.length} frontend incomes`);
+      for (const guestInc of guestIncomes) {
         try {
-          if (!guestIncome.name || guestIncome.amount === undefined || !guestIncome.date) {
-            results.errors.push(`Skipping income: missing required fields`);
-            continue;
-          }
+          if (!guestInc.name || guestInc.amount === undefined || !guestInc.date) continue;
 
           const incomeData = {
             user: userId,
             sheet: finalSheetId,
-            name: guestIncome.name,
-            source: (guestIncome.source || "others").toLowerCase(),
-            amount: Number(guestIncome.amount),
-            date: new Date(guestIncome.date),
-            method: guestIncome.method || "upi",
-            familyMemberName: guestIncome.familyMemberName || req.user.name,
-            note: guestIncome.note || ""
+            name: guestInc.name,
+            source: (guestInc.source || "others").toLowerCase(),
+            amount: Number(guestInc.amount),
+            date: new Date(guestInc.date),
+            method: guestInc.method || "upi",
+            familyMemberName: guestInc.familyMemberName || req.user.name,
+            note: guestInc.note || "",
+            localId: guestInc._id
           };
 
-          if (guestIncome._id && mongoose.Types.ObjectId.isValid(guestIncome._id)) {
-            await Income.findOneAndUpdate(
-              { 
-                _id: guestIncome._id, 
-                $or: [{ user: userId }, { guestId: guestId }] 
-              },
-              { $set: incomeData },
-              { upsert: true, new: true, setDefaultsOnInsert: true }
-            );
-          } else {
-            await Income.create(incomeData);
+          let query = { user: userId, localId: guestInc._id };
+          if (mongoose.Types.ObjectId.isValid(guestInc._id)) {
+            query = { _id: guestInc._id };
           }
+
+          await Income.findOneAndUpdate(query, { $set: incomeData }, { upsert: true, new: true });
           results.incomesMerged++;
         } catch (error) {
-          results.errors.push(`Failed to merge income "${guestIncome.name}": ${error.message}`);
+          console.error(`[Merge] Income error (${guestInc.name}):`, error.message);
+          results.errors.push(`Income "${guestInc.name}": ${error.message}`);
         }
       }
     }
 
-    res.json({
-      message: "Guest data merge completed",
-      results
-    });
+    console.log(`[Merge] Completed successfully for ${req.user.email}`);
+    res.json({ message: "Guest data merge completed", results });
   } catch (error) {
-    console.error("Merge guest data error:", error);
-    res.status(500).json({ message: error.message || "Failed to merge guest data" });
+    console.error("[Merge] Fatal error:", error);
+    res.status(500).json({ message: "Failed to merge guest data" });
   }
 };
 
