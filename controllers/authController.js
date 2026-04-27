@@ -473,7 +473,7 @@ exports.mergeGuestData = async (req, res) => {
 
           // Use upsert to handle cases where the transaction might already exist (e.g., partial previous merge)
           // We use the guest data's _id (UUID) as our primary way to prevent duplicates during merge.
-          if (guestExpense._id) {
+          if (guestExpense._id && mongoose.Types.ObjectId.isValid(guestExpense._id)) {
             await Expense.findOneAndUpdate(
               { 
                 _id: guestExpense._id, 
@@ -513,7 +513,7 @@ exports.mergeGuestData = async (req, res) => {
             note: guestIncome.note || ""
           };
 
-          if (guestIncome._id) {
+          if (guestIncome._id && mongoose.Types.ObjectId.isValid(guestIncome._id)) {
             await Income.findOneAndUpdate(
               { 
                 _id: guestIncome._id, 
